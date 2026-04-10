@@ -211,3 +211,65 @@ If a downstream stage assumes entities correspond to a remote item (e.g. a PR th
 # Cross-pipeline aggregation
 
 The "overview of all threads" / "what needs my attention" is not a `flow` concern. It operates at a higher level, collecting from several pipeline instances. Implementable as a script that runs `sap query` across relevant workspaces from multiple pipelines.
+
+
+# Agent interaction
+
+## Motivation
+
+AI agent sessions are fundamentally different from transitions: they are long-running, interactive, may need human steering/interruption/follow-up, and often benefit from shared context across multiple entities. Modelling agent interaction as transitions would be awkward -- the stdin/stdout contract is too narrow, and blocking `flow advance` on a long agent session is undesirable.
+
+## Decision
+
+Agent interaction is a layer *on top of* `flow`, just as `flow` is on top of `sap`. Agents operate *on* a workspace, not *through* a transition. They read and modify entities using `sap` CLI commands (`sap read`, `sap query`, `sap set`, `sap edit`) -- the same interface a human uses.
+
+The pipeline's role is to move entities into a stage where agent work is needed. The agent then works within that stage. When the agent is done (e.g. sets `done: true` or modifies fields to satisfy a transition condition), the next `flow advance` picks up the result and moves it forward through mechanical transitions.
+
+This keeps the layering clean:
+- `sap`: storage, schema validation, query, TUI
+- `flow`: movement between stages via mechanical transitions
+- agent tooling: interactive work within a stage
+
+## Dispatching agents via sap hooks
+
+To auto-dispatch agents when entities arrive in a stage, `sap` provides workspace hooks. Hooks are configured per-workspace and triggered explicitly by the caller (not automatically by sap operations).
+
+### Hook config
+
+Declared in the workspace's `hooks.yaml`:
+
+```yaml
+hooks:
+  post-import:
+    run: dispatch-agent
+    scope: batch       # or "entity"
+    args:
+      model: openai/gpt-5.3-codex
+```
+
+- **`post-import`**: the event type. Currently the only supported event.
+- **`scope: entity`**: the hook script is invoked once per entity ID provided.
+- **`scope: batch`**: the hook script is invoked once with all entity IDs provided.
+- **`run`**: executable path, resolved using the same rules as flow action scripts.
+- **`args`**: passed as `--key value` flags to the executable.
+
+### Invocation
+
+Hooks are triggered explicitly via `sap hooks run <event>`:
+
+```
+sap hooks run post-import <entity-id> [entity-id...]
+```
+
+The caller decides when to trigger hooks and which entity IDs to pass. `sap` does not auto-fire hooks on import or any other operation. This avoids the batch-boundary problem (sap sees individual imports but doesn't know when a batch is complete) and keeps sap free of implicit side effects.
+
+Typical callers:
+- `flow advance` calls `sap hooks run post-import` after importing entities into a stage
+- A human calls it manually after `sap import`
+- A script calls it as part of a larger operation
+
+### Requirements
+
+- Hook scripts must not block the caller. They are invoked asynchronously (fire-and-forget).
+- Hook scripts may interact with `sap` (read/modify entities in the workspace). They must not interact with `flow`.
+- Hook scripts must be defensive about concurrent execution if multiple hooks or agents may operate on the same workspace.
