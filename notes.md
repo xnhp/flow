@@ -147,6 +147,8 @@ Source transitions (fetching from external systems) are evaluated as part of `ad
 
 When a transition has multiple eligible entities, they are processed concurrently. Action scripts must be concurrency-friendly (see "Action scripts > Requirements").
 
+Each entity is imported into the destination workspace and removed from the source as soon as it finishes processing -- there is no staging/batching of results. This means partial progress is visible immediately: if 3 of 5 entities succeed, those 3 are in the destination before the other 2 finish or fail. However, the next transition in DAG order is not evaluated until all entities in the current transition have completed (successfully or not), so downstream transitions always see the full result set.
+
 Batch-scope transitions are a single invocation by definition, so concurrency doesn't apply there.
 
 ## Partial progress on failure
