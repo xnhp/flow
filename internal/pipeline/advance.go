@@ -23,6 +23,14 @@ type AdvanceOpts struct {
 	Verbose   bool
 }
 
+type transitionRunResult struct {
+	from     string
+	to       string
+	eligible int
+	moved    int
+	failed   int
+}
+
 // Advance evaluates all sources and transitions in DAG order, moving eligible entities.
 func Advance(p *config.Pipeline, baseDir string, opts AdvanceOpts) error {
 	// Ensure all stage workspaces exist.
@@ -45,10 +53,23 @@ func Advance(p *config.Pipeline, baseDir string, opts AdvanceOpts) error {
 		return fmt.Errorf("compute transition order: %w", err)
 	}
 
+	var transitionResults []transitionRunResult
+
 	for _, idx := range order {
 		t := p.Transitions[idx]
-		if err := runTransition(p, baseDir, t, opts); err != nil {
+		res, err := runTransition(p, baseDir, t, opts)
+		if res.eligible > 0 || res.moved > 0 || res.failed > 0 {
+			transitionResults = append(transitionResults, res)
+		}
+		if err != nil {
 			log.Printf("transition %s->%s: %v", t.From, t.To, err)
+		}
+	}
+
+	if len(transitionResults) > 0 {
+		log.Printf("transition summary:")
+		for _, r := range transitionResults {
+			log.Printf("  %s->%s moved=%d eligible=%d failed=%d", r.from, r.to, r.moved, r.eligible, r.failed)
 		}
 	}
 
@@ -168,8 +189,7 @@ func runSource(p *config.Pipeline, baseDir string, src config.Source, opts Advan
 	var importedIDs []string
 	for _, item := range items {
 		if src.DedupKey != "" {
-			key := item[src.DedupKey]
-			if key != nil && entityExistsInPipeline(p, baseDir, src.DedupKey, key) {
+			if key, ok := valueAtPath(item, src.DedupKey); ok && entityExistsInPipeline(p, baseDir, src.DedupKey, key) {
 				continue
 			}
 		}
@@ -202,12 +222,12 @@ func runSource(p *config.Pipeline, baseDir string, src config.Source, opts Advan
 	return nil
 }
 
-func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts AdvanceOpts) error {
+func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts AdvanceOpts) (transitionRunResult, error) {
 	fromDir := resolveStageDir(p, baseDir, t.From)
 	toDir := resolveStageDir(p, baseDir, t.To)
 
 	if fromDir == "" || toDir == "" {
-		return fmt.Errorf("stages not found: from=%q to=%q", t.From, t.To)
+		return transitionRunResult{from: t.From, to: t.To}, fmt.Errorf("stages not found: from=%q to=%q", t.From, t.To)
 	}
 
 	// Find eligible entities.
@@ -219,12 +239,14 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 		ids, err = sap.AllEntityIDs(fromDir)
 	}
 	if err != nil {
-		return fmt.Errorf("query eligible entities: %w", err)
+		return transitionRunResult{from: t.From, to: t.To}, fmt.Errorf("query eligible entities: %w", err)
 	}
 
 	if len(ids) == 0 {
-		return nil
+		return transitionRunResult{from: t.From, to: t.To}, nil
 	}
+
+	result := transitionRunResult{from: t.From, to: t.To, eligible: len(ids)}
 
 	if opts.Verbose {
 		log.Printf("transition %s->%s: %d eligible entities", t.From, t.To, len(ids))
@@ -237,15 +259,21 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 
 	switch scope {
 	case "entity":
-		return runEntityTransition(fromDir, toDir, t, ids, opts)
+		moved, failed, err := runEntityTransition(fromDir, toDir, t, ids, opts)
+		result.moved = moved
+		result.failed = failed
+		return result, err
 	case "batch":
-		return runBatchTransition(fromDir, toDir, t, ids, opts)
+		moved, failed, err := runBatchTransition(fromDir, toDir, t, ids, opts)
+		result.moved = moved
+		result.failed = failed
+		return result, err
 	default:
-		return fmt.Errorf("unknown scope %q", scope)
+		return result, fmt.Errorf("unknown scope %q", scope)
 	}
 }
 
-func runEntityTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) error {
+func runEntityTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
 	type result struct {
 		id         string
 		importedID string
@@ -254,6 +282,7 @@ func runEntityTransition(fromDir, toDir string, t config.Transition, ids []strin
 
 	results := make(chan result, len(ids))
 	var wg sync.WaitGroup
+	var mutateMu sync.Mutex
 
 	for _, id := range ids {
 		wg.Add(1)
@@ -278,16 +307,20 @@ func runEntityTransition(fromDir, toDir string, t config.Transition, ids []strin
 				outputData = entityData
 			}
 
+			mutateMu.Lock()
 			importOut, err := sap.Import(toDir, outputData)
 			if err != nil {
+				mutateMu.Unlock()
 				results <- result{entityID, "", fmt.Errorf("import to %s: %w", toDir, err)}
 				return
 			}
 
 			if err := sap.Remove(fromDir, entityID); err != nil {
+				mutateMu.Unlock()
 				results <- result{entityID, "", fmt.Errorf("remove from %s: %w", fromDir, err)}
 				return
 			}
+			mutateMu.Unlock()
 
 			results <- result{entityID, extractImportedID(importOut), nil}
 		}(id)
@@ -319,29 +352,29 @@ func runEntityTransition(fromDir, toDir string, t config.Transition, ids []strin
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("%d entities failed", len(errs))
+		return len(importedIDs), len(errs), fmt.Errorf("%d entities failed", len(errs))
 	}
-	return nil
+	return len(importedIDs), 0, nil
 }
 
-func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) error {
+func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
 	// Read all entities from YAML files.
 	var entities []map[string]interface{}
 	for _, id := range ids {
 		data, err := os.ReadFile(filepath.Join(fromDir, "entities", id+".yaml"))
 		if err != nil {
-			return fmt.Errorf("read entity %s: %w", id, err)
+			return 0, 0, fmt.Errorf("read entity %s: %w", id, err)
 		}
 		var m map[string]interface{}
 		if err := yaml.Unmarshal(data, &m); err != nil {
-			return fmt.Errorf("parse entity %s: %w", id, err)
+			return 0, 0, fmt.Errorf("parse entity %s: %w", id, err)
 		}
 		entities = append(entities, m)
 	}
 
 	input, err := json.Marshal(entities)
 	if err != nil {
-		return fmt.Errorf("marshal batch input: %w", err)
+		return 0, 0, fmt.Errorf("marshal batch input: %w", err)
 	}
 
 	if t.Run == "" {
@@ -362,18 +395,18 @@ func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string
 				log.Printf("  batch move: hooks: %v", err)
 			}
 		}
-		return nil
+		return len(importedIDs), len(ids) - len(importedIDs), nil
 	}
 
 	outputData, err := runAction(t.Run, t.Args, input, opts)
 	if err != nil {
-		return fmt.Errorf("batch action: %w", err)
+		return 0, len(ids), fmt.Errorf("batch action: %w", err)
 	}
 
 	// Parse output as array of entities.
 	var outputEntities []map[string]interface{}
 	if err := json.Unmarshal(outputData, &outputEntities); err != nil {
-		return fmt.Errorf("parse batch output: %w", err)
+		return 0, len(ids), fmt.Errorf("parse batch output: %w", err)
 	}
 
 	// Import all output entities.
@@ -404,7 +437,11 @@ func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string
 		}
 	}
 
-	return nil
+	failed = len(ids) - len(importedIDs)
+	if failed < 0 {
+		failed = 0
+	}
+	return len(importedIDs), failed, nil
 }
 
 func runAction(executable string, args map[string]string, stdin []byte, opts AdvanceOpts) ([]byte, error) {
@@ -546,9 +583,12 @@ func normalizeFloats(m map[string]interface{}) {
 }
 
 // entityExistsInPipeline checks all stages for an entity with the given property value
-// by reading entity YAML files directly.
-func entityExistsInPipeline(p *config.Pipeline, baseDir string, property string, value interface{}) bool {
+// by reading entity YAML files directly. Supports nested property paths (dot notation),
+// e.g. "permalink" or "item.permalink".
+func entityExistsInPipeline(p *config.Pipeline, baseDir string, propertyPath string, value interface{}) bool {
 	needle := fmt.Sprintf("%v", value)
+	candidatePaths := dedupCandidatePaths(propertyPath)
+
 	for _, stage := range p.Stages {
 		dir := resolvePath(baseDir, stage.Workspace)
 		entDir := filepath.Join(dir, "entities")
@@ -568,12 +608,45 @@ func entityExistsInPipeline(p *config.Pipeline, baseDir string, property string,
 			if err := yaml.Unmarshal(data, &m); err != nil {
 				continue
 			}
-			if fmt.Sprintf("%v", m[property]) == needle {
-				return true
+			for _, path := range candidatePaths {
+				if found, ok := valueAtPath(m, path); ok && fmt.Sprintf("%v", found) == needle {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// dedupCandidatePaths returns property paths checked for dedup matching.
+// It always includes the configured path. For non-nested keys, it also checks
+// "item.<key>" to match transformed triaged entities.
+func dedupCandidatePaths(propertyPath string) []string {
+	if strings.Contains(propertyPath, ".") {
+		return []string{propertyPath}
+	}
+	return []string{propertyPath, "item." + propertyPath}
+}
+
+// valueAtPath returns a value from a map using dot-separated path segments.
+func valueAtPath(m map[string]interface{}, path string) (interface{}, bool) {
+	if m == nil || path == "" {
+		return nil, false
+	}
+	parts := strings.Split(path, ".")
+	var current interface{} = m
+	for _, part := range parts {
+		asMap, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		next, ok := asMap[part]
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return current, true
 }
 
 func resolveStageDir(p *config.Pipeline, baseDir string, stageName string) string {
