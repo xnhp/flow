@@ -213,26 +213,15 @@ If a downstream stage assumes entities correspond to a remote item (e.g. a PR th
 The "overview of all threads" / "what needs my attention" is not a `flow` concern. It operates at a higher level, collecting from several pipeline instances. Implementable as a script that runs `sap query` across relevant workspaces from multiple pipelines.
 
 
-# Agent interaction
+# Sap hooks
 
 ## Motivation
 
-AI agent sessions are fundamentally different from transitions: they are long-running, interactive, may need human steering/interruption/follow-up, and often benefit from shared context across multiple entities. Modelling agent interaction as transitions would be awkward -- the stdin/stdout contract is too narrow, and blocking `flow advance` on a long agent session is undesirable.
+After entities are added to a workspace, it is often useful to trigger follow-up actions: dispatching an AI agent, sending a notification, running `flow advance` to push entities further, logging, etc. Rather than building these triggers into `flow` or any specific tool, hooks are a general-purpose mechanism on `sap` workspaces.
 
 ## Decision
 
-Agent interaction is a layer *on top of* `flow`, just as `flow` is on top of `sap`. Agents operate *on* a workspace, not *through* a transition. They read and modify entities using `sap` CLI commands (`sap read`, `sap query`, `sap set`, `sap edit`) -- the same interface a human uses.
-
-The pipeline's role is to move entities into a stage where agent work is needed. The agent then works within that stage. When the agent is done (e.g. sets `done: true` or modifies fields to satisfy a transition condition), the next `flow advance` picks up the result and moves it forward through mechanical transitions.
-
-This keeps the layering clean:
-- `sap`: storage, schema validation, query, TUI
-- `flow`: movement between stages via mechanical transitions
-- agent tooling: interactive work within a stage
-
-## Dispatching agents via sap hooks
-
-To auto-dispatch agents when entities arrive in a stage, `sap` provides workspace hooks. Hooks are configured per-workspace and triggered explicitly by the caller (not automatically by sap operations).
+`sap` provides per-workspace hooks that are triggered explicitly by the caller. Hooks are not fired automatically by sap operations -- the caller decides when to trigger them and which entity IDs to pass. This avoids the batch-boundary problem (sap sees individual imports but doesn't know when a batch is complete) and keeps sap free of implicit side effects.
 
 ### Hook config
 
@@ -261,8 +250,6 @@ Hooks are triggered explicitly via `sap hooks run <event>`:
 sap hooks run post-import <entity-id> [entity-id...]
 ```
 
-The caller decides when to trigger hooks and which entity IDs to pass. `sap` does not auto-fire hooks on import or any other operation. This avoids the batch-boundary problem (sap sees individual imports but doesn't know when a batch is complete) and keeps sap free of implicit side effects.
-
 Typical callers:
 - `flow advance` calls `sap hooks run post-import` after importing entities into a stage
 - A human calls it manually after `sap import`
@@ -272,4 +259,24 @@ Typical callers:
 
 - Hook scripts must not block the caller. They are invoked asynchronously (fire-and-forget).
 - Hook scripts may interact with `sap` (read/modify entities in the workspace). They must not interact with `flow`.
-- Hook scripts must be defensive about concurrent execution if multiple hooks or agents may operate on the same workspace.
+- Hook scripts must be defensive about concurrent execution if multiple hooks may operate on the same workspace.
+
+
+# Agent interaction
+
+## Motivation
+
+AI agent sessions are fundamentally different from transitions: they are long-running, interactive, may need human steering/interruption/follow-up, and often benefit from shared context across multiple entities. Modelling agent interaction as transitions would be awkward -- the stdin/stdout contract is too narrow, and blocking `flow advance` on a long agent session is undesirable.
+
+## Decision
+
+Agent interaction is a layer *on top of* `flow`, just as `flow` is on top of `sap`. Agents operate *on* a workspace, not *through* a transition. They read and modify entities using `sap` CLI commands (`sap read`, `sap query`, `sap set`, `sap edit`) -- the same interface a human uses.
+
+The pipeline's role is to move entities into a stage where agent work is needed. The agent then works within that stage. When the agent is done (e.g. sets `done: true` or modifies fields to satisfy a transition condition), the next `flow advance` picks up the result and moves it forward through mechanical transitions.
+
+This keeps the layering clean:
+- `sap`: storage, schema validation, query, TUI
+- `flow`: movement between stages via mechanical transitions
+- agent tooling: interactive work within a stage
+
+Agent dispatch is one use case for sap hooks -- e.g. a `post-import` hook on a "triaged" stage can dispatch an agent to work on newly arrived entities.
