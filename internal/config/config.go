@@ -34,12 +34,14 @@ type Source struct {
 
 // Transition declares movement of entities between stages.
 type Transition struct {
-	From      string            `yaml:"from"`
-	To        string            `yaml:"to"`
-	Condition string            `yaml:"condition,omitempty"`
-	Run       string            `yaml:"run,omitempty"`
-	Args      map[string]string `yaml:"args,omitempty"`
-	Scope     string            `yaml:"scope,omitempty"` // "entity" (default) or "batch"
+	From         string            `yaml:"from"`
+	To           string            `yaml:"to"`
+	Condition    string            `yaml:"condition,omitempty"`
+	CriteriaRun  string            `yaml:"criteria_run,omitempty"`
+	CriteriaArgs map[string]string `yaml:"criteria_args,omitempty"`
+	Run          string            `yaml:"run,omitempty"`
+	Args         map[string]string `yaml:"args,omitempty"`
+	Scope        string            `yaml:"scope,omitempty"` // "entity" (default) or "batch"
 }
 
 // Load reads a flow.yaml file and returns a validated Pipeline.
@@ -116,6 +118,9 @@ func validate(p *Pipeline) error {
 		}
 		if t.Scope != "" && t.Scope != "entity" && t.Scope != "batch" {
 			return fmt.Errorf("transition %d: scope must be 'entity' or 'batch', got %q", i, t.Scope)
+		}
+		if t.CriteriaRun == "" && len(t.CriteriaArgs) > 0 {
+			return fmt.Errorf("transition %d: criteria_args requires criteria_run", i)
 		}
 	}
 
