@@ -78,28 +78,3 @@ func TestEntityExistsInPipeline_MatchesExactNestedPath(t *testing.T) {
 		t.Fatalf("expected dedup check to match explicit nested path")
 	}
 }
-
-func TestRunCriteriaExitCodes(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "criteria.sh")
-	content := "#!/usr/bin/env bash\nif grep -q 'ready: true'; then\n  exit 0\nfi\nexit 1\n"
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	matches, err := runCriteria(script, nil, []byte("ready: true\n"), AdvanceOpts{})
-	if err != nil {
-		t.Fatalf("runCriteria ready=true failed: %v", err)
-	}
-	if !matches {
-		t.Fatal("expected ready=true input to match")
-	}
-
-	matches, err = runCriteria(script, nil, []byte("ready: false\n"), AdvanceOpts{})
-	if err != nil {
-		t.Fatalf("runCriteria ready=false failed: %v", err)
-	}
-	if matches {
-		t.Fatal("expected ready=false input to not match")
-	}
-}

@@ -6,7 +6,7 @@
 
 `sap` stays pure: workspaces, entities, schemas, query, import, TUI. No knowledge of pipelines.
 
-`flow` reads a pipeline config declaring stages (workspace paths) and transitions between them. Each transition can use a condition (query expression) and/or a criteria executable to decide eligibility, then optionally runs an action executable. `advance` evaluates: for each transition, query the source workspace, apply criteria filtering, run the action, `sap import` the result into the destination workspace (removing from the source).
+`flow` reads a pipeline config declaring stages (workspace paths) and transitions between them. Each transition has a condition (query expression) and an action (executable). `advance` evaluates: for each transition, run `sap query` on the source workspace, find eligible entities, run the executable, `sap import` the result into the destination workspace (removing from the source).
 
 ## Relation to `sap`
 
@@ -54,18 +54,11 @@ transitions:
 
   - from: implemented
     to: posted
-    criteria_run: is-ready-to-post
+    condition: "committed == true"
     run: post-and-resolve
 ```
 
-Stages are sap workspace paths. Transitions describe movement between stages: a source workspace, a destination workspace, optional eligibility checks, and optionally an executable.
-
-Eligibility checks:
-- `condition`: a `sap query` expression evaluated in the source workspace.
-- `criteria_run`: an executable evaluated per candidate entity. The entity YAML is passed on stdin. Exit code `0` means eligible, `1` means not eligible, any other exit code is treated as a per-entity failure.
-- `criteria_args`: optional `--key value` flags for `criteria_run`.
-
-When both `condition` and `criteria_run` are present, both must match.
+Stages are sap workspace paths. Transitions describe movement between stages: a source workspace, a destination workspace, optionally a condition (sap query expression), and optionally an executable.
 
 
 # Transition scope

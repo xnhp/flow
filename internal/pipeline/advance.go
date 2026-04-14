@@ -242,19 +242,11 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 		return transitionRunResult{from: t.From, to: t.To}, fmt.Errorf("query eligible entities: %w", err)
 	}
 
-	criteriaFailed := 0
-	if t.CriteriaRun != "" {
-		ids, criteriaFailed, err = filterEligibleByCriteria(fromDir, t, ids, opts)
-		if err != nil {
-			return transitionRunResult{from: t.From, to: t.To, failed: criteriaFailed}, fmt.Errorf("filter by criteria: %w", err)
-		}
-	}
-
 	if len(ids) == 0 {
-		return transitionRunResult{from: t.From, to: t.To, failed: criteriaFailed}, nil
+		return transitionRunResult{from: t.From, to: t.To}, nil
 	}
 
-	result := transitionRunResult{from: t.From, to: t.To, eligible: len(ids), failed: criteriaFailed}
+	result := transitionRunResult{from: t.From, to: t.To, eligible: len(ids)}
 
 	if opts.Verbose {
 		log.Printf("transition %s->%s: %d eligible entities", t.From, t.To, len(ids))
@@ -269,56 +261,16 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 	case "entity":
 		moved, failed, err := runEntityTransition(fromDir, toDir, t, ids, opts)
 		result.moved = moved
-		result.failed += failed
+		result.failed = failed
 		return result, err
 	case "batch":
 		moved, failed, err := runBatchTransition(fromDir, toDir, t, ids, opts)
 		result.moved = moved
-		result.failed += failed
+		result.failed = failed
 		return result, err
 	default:
 		return result, fmt.Errorf("unknown scope %q", scope)
 	}
-}
-
-func filterEligibleByCriteria(fromDir string, t config.Transition, ids []string, opts AdvanceOpts) ([]string, int, error) {
-	execPath, err := resolveExecutable(t.CriteriaRun)
-	if err != nil {
-		return nil, len(ids), fmt.Errorf("resolve executable %q: %w", t.CriteriaRun, err)
-	}
-
-	var cmdArgs []string
-	for k, v := range t.CriteriaArgs {
-		if v == "true" {
-			cmdArgs = append(cmdArgs, "--"+k)
-		} else {
-			cmdArgs = append(cmdArgs, "--"+k, v)
-		}
-	}
-
-	eligible := make([]string, 0, len(ids))
-	failed := 0
-
-	for _, id := range ids {
-		entityData, err := sap.ReadEntity(fromDir, id)
-		if err != nil {
-			failed++
-			log.Printf("  transition %s->%s criteria %s: read entity %s: %v", t.From, t.To, t.CriteriaRun, id, err)
-			continue
-		}
-
-		matches, err := runCriteria(execPath, cmdArgs, entityData, opts)
-		if err != nil {
-			failed++
-			log.Printf("  transition %s->%s criteria %s: entity %s: %v", t.From, t.To, t.CriteriaRun, id, err)
-			continue
-		}
-		if matches {
-			eligible = append(eligible, id)
-		}
-	}
-
-	return eligible, failed, nil
 }
 
 func runEntityTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
@@ -523,27 +475,6 @@ func runAction(executable string, args map[string]string, stdin []byte, opts Adv
 	}
 
 	return stdout.Bytes(), nil
-}
-
-func runCriteria(execPath string, args []string, stdin []byte, opts AdvanceOpts) (bool, error) {
-	cmd := exec.Command(execPath, args...)
-	cmd.Stdin = bytes.NewReader(stdin)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if opts.Verbose {
-		log.Printf("  criteria: %s %v", execPath, args)
-	}
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return false, nil
-		}
-		return false, fmt.Errorf("%s: %s: %w", execPath, stderr.String(), err)
-	}
-
-	return true, nil
 }
 
 // extractImportedID extracts the entity ID from sap import output like "import ok: e-000001".
