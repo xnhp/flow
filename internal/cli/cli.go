@@ -22,8 +22,8 @@ func Run(args []string) error {
 	case "-h", "--help", "help":
 		printHelp(os.Stdout)
 		return nil
-	case "advance":
-		return runAdvance(args[1:])
+	case "nudge":
+		return runNudge(args[1:])
 	case "status":
 		return runStatus(args[1:])
 	default:
@@ -36,17 +36,17 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "Use flow for orchestration; keep entity editing/validation in sap.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  flow advance [flags]    Evaluate all transitions and move eligible entities")
+	fmt.Fprintln(w, "  flow nudge [flags]      Evaluate all transitions and move eligible entities")
 	fmt.Fprintln(w, "  flow status             Show entity counts per stage")
 	fmt.Fprintln(w, "  flow help               Show this help")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Advance flags:")
+	fmt.Fprintln(w, "Nudge flags:")
 	fmt.Fprintln(w, "  --no-sources            Skip source fetching (only process existing entities)")
 	fmt.Fprintln(w, "  --verbose               Show detailed progress")
 	fmt.Fprintln(w, "  --config <path>         Path to flow.yaml (default: ./flow.yaml)")
 }
 
-func runAdvance(args []string) error {
+func runNudge(args []string) error {
 	var opts pipeline.AdvanceOpts
 	configPath := "flow.yaml"
 

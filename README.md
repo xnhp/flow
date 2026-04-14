@@ -6,7 +6,7 @@
 
 `sap` stays pure: workspaces, entities, schemas, query, import, TUI. No knowledge of pipelines.
 
-`flow` reads a pipeline config declaring stages (workspace paths) and transitions between them. Each transition has a condition (query expression) and an action (executable). `advance` evaluates: for each transition, run `sap query` on the source workspace, find eligible entities, run the executable, `sap import` the result into the destination workspace (removing from the source).
+`flow` reads a pipeline config declaring stages (workspace paths) and transitions between them. Each transition has a condition (query expression) and an action (executable). `nudge` evaluates: for each transition, run `sap query` on the source workspace, find eligible entities, run the executable, `sap import` the result into the destination workspace (removing from the source).
 
 ## Relation to `sap`
 
@@ -114,7 +114,7 @@ When an entity moves from one stage to another, it should be traceable as "the s
 
 ## Motivation
 
-Source stages fetch from external systems (e.g. PR comments via REST API). Unlike internal transitions, the fetch script returns *all* matching items every time. Without dedup, each `advance` would re-feed the same unresolved comment into the pipeline until it eventually gets resolved on the remote.
+Source stages fetch from external systems (e.g. PR comments via REST API). Unlike internal transitions, the fetch script returns *all* matching items every time. Without dedup, each `nudge` would re-feed the same unresolved comment into the pipeline until it eventually gets resolved on the remote.
 
 ## Decision
 
@@ -129,19 +129,19 @@ source:
 ```
 
 
-# `flow advance` behaviour
+# `flow nudge` behaviour
 
 ## DAG-order evaluation
 
 The pipeline is a DAG, not necessarily a linear chain. Multiple transitions can feed into the same stage, and one stage can fan out to multiple destinations.
 
-`flow advance` evaluates transitions in topological order (DAG order) in a single pass. This means an entity moved from stage A to stage B in an earlier transition can be picked up by the B→C transition in the same `advance` call -- cascading through multiple stages in one invocation.
+`flow nudge` evaluates transitions in topological order (DAG order) in a single pass. This means an entity moved from stage A to stage B in an earlier transition can be picked up by the B→C transition in the same `nudge` call -- cascading through multiple stages in one invocation.
 
 ## Source fetching
 
-Source transitions (fetching from external systems) are evaluated as part of `advance`, as the first step before internal transitions. This means every `advance` call checks for new items from external sources, then processes the full pipeline.
+Source transitions (fetching from external systems) are evaluated as part of `nudge`, as the first step before internal transitions. This means every `nudge` call checks for new items from external sources, then processes the full pipeline.
 
-`flow advance --no-sources` skips source transitions, only processing items already in the pipeline. Useful when you want to avoid API calls or just push existing items forward.
+`flow nudge --no-sources` skips source transitions, only processing items already in the pipeline. Useful when you want to avoid API calls or just push existing items forward.
 
 ## Concurrency within a transition
 
@@ -153,9 +153,9 @@ Batch-scope transitions are a single invocation by definition, so concurrency do
 
 ## Partial progress on failure
 
-If processing fails for some entities within a transition, the successfully processed entities are still moved to the destination workspace. Failed entities stay in their current stage. `advance` logs the errors and continues with the next transition in DAG order.
+If processing fails for some entities within a transition, the successfully processed entities are still moved to the destination workspace. Failed entities stay in their current stage. `nudge` logs the errors and continues with the next transition in DAG order.
 
-Entities that were successfully moved to a destination stage by an earlier transition are eligible for pickup by later transitions in the same `advance` call.
+Entities that were successfully moved to a destination stage by an earlier transition are eligible for pickup by later transitions in the same `nudge` call.
 
 
 # Reactive transitions / triggering
@@ -166,15 +166,15 @@ When a user (or agent) unblocks an item -- e.g. sets `ready` to `true` -- downst
 
 ## Decision
 
-`flow advance` evaluates all transitions. For each transition, it queries the source workspace for eligible entities and moves them through the action to the destination workspace.
+`flow nudge` evaluates all transitions. For each transition, it queries the source workspace for eligible entities and moves them through the action to the destination workspace.
 
-The trigger for `flow advance` is a separate concern from `flow` itself:
-- TUI calls `advance` after save -- reactive during interactive use
-- Agent calls `advance` after modifying entities -- reactive during automated use
-- A filesystem watcher calls `advance` on changes -- fully automatic
-- User calls `advance` manually -- full control
+The trigger for `flow nudge` is a separate concern from `flow` itself:
+- TUI calls `nudge` after save -- reactive during interactive use
+- Agent calls `nudge` after modifying entities -- reactive during automated use
+- A filesystem watcher calls `nudge` on changes -- fully automatic
+- User calls `nudge` manually -- full control
 
-An entity's current stage is defined by which workspace it's in. Once it moves out of a stage, `sap query` no longer finds it there. This makes `advance` naturally idempotent -- running it twice produces the same result.
+An entity's current stage is defined by which workspace it's in. Once it moves out of a stage, `sap query` no longer finds it there. This makes `nudge` naturally idempotent -- running it twice produces the same result.
 
 
 # Failure handling
@@ -182,7 +182,7 @@ An entity's current stage is defined by which workspace it's in. Once it moves o
 ## Decisions
 
 - Action scripts must be either sufficiently defensive or atomic enough that failure = "nothing happened" (no partial side effects left behind).
-- If an action fails, the entity stays in its current stage, the error is logged by `advance`, and processing continues with other eligible entities.
+- If an action fails, the entity stays in its current stage, the error is logged by `nudge`, and processing continues with other eligible entities.
 - No retry logic, no explicit `failed` state -- keep it simple for now.
 - An entity is not moved to the destination workspace if its associated action failed.
 
@@ -203,7 +203,7 @@ What if the remote state changes while an entity is in-flight in the pipeline? E
 
 # Manual injection
 
-Entities can be added to any stage manually via `sap import`. As long as the entity conforms to the workspace schema, `flow` treats it like any other entity on the next `advance`.
+Entities can be added to any stage manually via `sap import`. As long as the entity conforms to the workspace schema, `flow` treats it like any other entity on the next `nudge`.
 
 If a downstream stage assumes entities correspond to a remote item (e.g. a PR thread), but manually added entities don't, a filter stage before that action handles this -- it's not `flow`'s problem to solve.
 
@@ -217,7 +217,7 @@ The "overview of all threads" / "what needs my attention" is not a `flow` concer
 
 ## Motivation
 
-After entities are added to a workspace, it is often useful to trigger follow-up actions: dispatching an AI agent, sending a notification, running `flow advance` to push entities further, logging, etc. Rather than building these triggers into `flow` or any specific tool, hooks are a general-purpose mechanism on `sap` workspaces.
+After entities are added to a workspace, it is often useful to trigger follow-up actions: dispatching an AI agent, sending a notification, running `flow nudge` to push entities further, logging, etc. Rather than building these triggers into `flow` or any specific tool, hooks are a general-purpose mechanism on `sap` workspaces.
 
 ## Decision
 
@@ -251,7 +251,7 @@ sap hooks run post-import <entity-id> [entity-id...]
 ```
 
 Typical callers:
-- `flow advance` automatically calls `sap hooks run post-import` after importing entities into any stage (sources and transitions). If no hook is configured on the workspace, this is a silent no-op.
+- `flow nudge` automatically calls `sap hooks run post-import` after importing entities into any stage (sources and transitions). If no hook is configured on the workspace, this is a silent no-op.
 - A human calls it manually after `sap import`
 - A script calls it as part of a larger operation
 
@@ -266,13 +266,13 @@ Typical callers:
 
 ## Motivation
 
-AI agent sessions are fundamentally different from transitions: they are long-running, interactive, may need human steering/interruption/follow-up, and often benefit from shared context across multiple entities. Modelling agent interaction as transitions would be awkward -- the stdin/stdout contract is too narrow, and blocking `flow advance` on a long agent session is undesirable.
+AI agent sessions are fundamentally different from transitions: they are long-running, interactive, may need human steering/interruption/follow-up, and often benefit from shared context across multiple entities. Modelling agent interaction as transitions would be awkward -- the stdin/stdout contract is too narrow, and blocking `flow nudge` on a long agent session is undesirable.
 
 ## Decision
 
 Agent interaction is a layer *on top of* `flow`, just as `flow` is on top of `sap`. Agents operate *on* a workspace, not *through* a transition. They read and modify entities using `sap` CLI commands (`sap read`, `sap query`, `sap set`, `sap edit`) -- the same interface a human uses.
 
-The pipeline's role is to move entities into a stage where agent work is needed. The agent then works within that stage. When the agent is done (e.g. sets `done: true` or modifies fields to satisfy a transition condition), the next `flow advance` picks up the result and moves it forward through mechanical transitions.
+The pipeline's role is to move entities into a stage where agent work is needed. The agent then works within that stage. When the agent is done (e.g. sets `done: true` or modifies fields to satisfy a transition condition), the next `flow nudge` picks up the result and moves it forward through mechanical transitions.
 
 This keeps the layering clean:
 - `sap`: storage, schema validation, query, TUI
