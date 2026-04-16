@@ -112,16 +112,19 @@ func Remove(workspaceDir string, id string) error {
 	return nil
 }
 
-// WorkspaceInit runs `sap workspace init <schemaPath>` in the given directory.
+// WorkspaceInit runs `sap workspace init --name <name> --schema <schemaPath>`.
 func WorkspaceInit(dir string, schemaPath string) error {
-	cmd := exec.Command("sap", "workspace", "init", schemaPath)
-	cmd.Dir = dir
+	parentDir := filepath.Dir(dir)
+	workspaceName := filepath.Base(dir)
+
+	cmd := exec.Command("sap", "workspace", "init", "--name", workspaceName, "--schema", schemaPath)
+	cmd.Dir = parentDir
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sap workspace init in %s: %s: %w", dir, stderr.String(), err)
+		return fmt.Errorf("sap workspace init in %s: %s: %w", parentDir, stderr.String(), err)
 	}
 	return nil
 }

@@ -82,9 +82,9 @@ func ensureWorkspaces(p *config.Pipeline, baseDir string) error {
 		if sap.WorkspaceExists(dir) {
 			continue
 		}
-		// Create the directory if needed.
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
+		// Ensure the parent directory exists for workspace init.
+		if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dir), err)
 		}
 		// Init with schema if specified.
 		schemaPath := stage.Schema
