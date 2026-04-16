@@ -95,46 +95,8 @@ func ensureWorkspaces(p *config.Pipeline, baseDir string) error {
 			continue
 		}
 		schemaPath = resolvePath(baseDir, schemaPath)
-		// Copy sibling schema files first so $ref targets resolve during init.
-		if err := copySiblingSchemas(schemaPath, dir); err != nil {
-			return fmt.Errorf("copy sibling schemas for %s: %w", dir, err)
-		}
 		if err := sap.WorkspaceInit(dir, schemaPath); err != nil {
 			return fmt.Errorf("init workspace %s: %w", dir, err)
-		}
-	}
-	return nil
-}
-
-// copySiblingSchemas copies *.schema.yaml files from the source schema's
-// directory into the workspace directory so that $ref targets resolve.
-func copySiblingSchemas(schemaPath, workspaceDir string) error {
-	srcDir := filepath.Dir(schemaPath)
-	srcBase := filepath.Base(schemaPath)
-
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		return err
-	}
-
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || name == srcBase {
-			continue
-		}
-		if !strings.HasSuffix(name, ".schema.yaml") && !strings.HasSuffix(name, ".schema.json") {
-			continue
-		}
-		dst := filepath.Join(workspaceDir, name)
-		if _, err := os.Stat(dst); err == nil {
-			continue // already exists
-		}
-		data, err := os.ReadFile(filepath.Join(srcDir, name))
-		if err != nil {
-			return fmt.Errorf("read %s: %w", name, err)
-		}
-		if err := os.WriteFile(dst, data, 0644); err != nil {
-			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
 	return nil
