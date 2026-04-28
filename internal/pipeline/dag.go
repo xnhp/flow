@@ -29,7 +29,9 @@ func TopoOrder(p *config.Pipeline) ([]int, error) {
 	// any transition that outputs to T's source stage.
 	producedBy := make(map[string][]int) // stage name -> transitions that write to it
 	for i, t := range p.Transitions {
-		producedBy[t.To] = append(producedBy[t.To], i)
+		if t.To != "" {
+			producedBy[t.To] = append(producedBy[t.To], i)
+		}
 	}
 
 	// deps[i] = set of transition indices that must run before transition i

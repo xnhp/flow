@@ -98,16 +98,16 @@ func Import(workspaceDir string, yamlContent []byte) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// Remove runs `sap remove <id>` in the given workspace directory.
+// Remove runs `sap delete-entity <id>` in the given workspace directory.
 func Remove(workspaceDir string, id string) error {
-	cmd := exec.Command("sap", "remove", id)
+	cmd := exec.Command("sap", "delete-entity", id)
 	cmd.Dir = workspaceDir
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sap remove %s in %s: %s: %w", id, workspaceDir, stderr.String(), err)
+		return fmt.Errorf("sap delete-entity %s in %s: %s: %w", id, workspaceDir, stderr.String(), err)
 	}
 	return nil
 }

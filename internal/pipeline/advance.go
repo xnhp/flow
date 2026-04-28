@@ -26,8 +26,10 @@ type AdvanceOpts struct {
 type transitionRunResult struct {
 	from     string
 	to       string
+	effect   string
 	eligible int
 	moved    int
+	rejected int
 	failed   int
 }
 
@@ -69,7 +71,11 @@ func Advance(p *config.Pipeline, baseDir string, opts AdvanceOpts) error {
 	if len(transitionResults) > 0 {
 		log.Printf("transition summary:")
 		for _, r := range transitionResults {
-			log.Printf("  %s->%s moved=%d eligible=%d failed=%d", r.from, r.to, r.moved, r.eligible, r.failed)
+			if r.effect == "sink" {
+				log.Printf("  %s->(sink) moved=%d eligible=%d rejected=%d failed=%d", r.from, r.moved, r.eligible, r.rejected, r.failed)
+				continue
+			}
+			log.Printf("  %s->%s moved=%d eligible=%d rejected=%d failed=%d", r.from, r.to, r.moved, r.eligible, r.rejected, r.failed)
 		}
 	}
 
@@ -148,8 +154,26 @@ func runSource(p *config.Pipeline, baseDir string, src config.Source, opts Advan
 	}
 
 	// Dedup and import.
+	conflictedSyncIDs := map[string]bool{}
+	if src.DedupKey == "_sync.id" {
+		conflictedSyncIDs = conflictedSyncIDsInPipeline(p, baseDir)
+	}
+
 	var importedIDs []string
+	skippedConflict := 0
 	for _, item := range items {
+		if src.DedupKey == "_sync.id" {
+			if key, ok := valueAtPath(item, "_sync.id"); ok {
+				if conflictedSyncIDs[fmt.Sprintf("%v", key)] {
+					skippedConflict++
+					if opts.Verbose {
+						log.Printf("source %s: skipping conflicted _sync.id=%v", src.Stage, key)
+					}
+					continue
+				}
+			}
+		}
+
 		if src.DedupKey != "" {
 			if key, ok := valueAtPath(item, src.DedupKey); ok && entityExistsInPipeline(p, baseDir, src.DedupKey, key) {
 				continue
@@ -173,6 +197,9 @@ func runSource(p *config.Pipeline, baseDir string, src config.Source, opts Advan
 	if opts.Verbose {
 		log.Printf("source %s: imported %d new entities", src.Stage, len(importedIDs))
 	}
+	if skippedConflict > 0 {
+		log.Printf("source %s: skipped %d item(s) due to conflicted _sync.id", src.Stage, skippedConflict)
+	}
 
 	// Trigger post-import hooks.
 	if len(importedIDs) > 0 {
@@ -186,10 +213,18 @@ func runSource(p *config.Pipeline, baseDir string, src config.Source, opts Advan
 
 func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts AdvanceOpts) (transitionRunResult, error) {
 	fromDir := resolveStageDir(p, baseDir, t.From)
-	toDir := resolveStageDir(p, baseDir, t.To)
+	effect := t.Effect
+	if effect == "" {
+		effect = "move"
+	}
 
-	if fromDir == "" || toDir == "" {
-		return transitionRunResult{from: t.From, to: t.To}, fmt.Errorf("stages not found: from=%q to=%q", t.From, t.To)
+	toDir := ""
+	if effect == "move" {
+		toDir = resolveStageDir(p, baseDir, t.To)
+	}
+
+	if fromDir == "" || (effect == "move" && toDir == "") {
+		return transitionRunResult{from: t.From, to: t.To, effect: effect}, fmt.Errorf("stages not found: from=%q to=%q", t.From, t.To)
 	}
 
 	// Find eligible entities.
@@ -201,17 +236,34 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 		ids, err = sap.AllEntityIDs(fromDir)
 	}
 	if err != nil {
-		return transitionRunResult{from: t.From, to: t.To}, fmt.Errorf("query eligible entities: %w", err)
+		return transitionRunResult{from: t.From, to: t.To, effect: effect}, fmt.Errorf("query eligible entities: %w", err)
 	}
 
 	if len(ids) == 0 {
-		return transitionRunResult{from: t.From, to: t.To}, nil
+		return transitionRunResult{from: t.From, to: t.To, effect: effect}, nil
 	}
 
-	result := transitionRunResult{from: t.From, to: t.To, eligible: len(ids)}
+	result := transitionRunResult{from: t.From, to: t.To, effect: effect, eligible: len(ids)}
+
+	if effect == "sink" {
+		filteredIDs, rejected := filterConflictedTransitionIDs(p, baseDir, fromDir, ids, opts)
+		result.rejected = rejected
+		ids = filteredIDs
+	}
 
 	if opts.Verbose {
-		log.Printf("transition %s->%s: %d eligible entities", t.From, t.To, len(ids))
+		if effect == "sink" {
+			log.Printf("transition %s->(sink): %d eligible entities (%d rejected due to conflicted _sync.id)", t.From, len(ids), result.rejected)
+		} else {
+			log.Printf("transition %s->%s: %d eligible entities", t.From, t.To, len(ids))
+		}
+	}
+
+	if len(ids) == 0 {
+		if result.rejected > 0 {
+			return result, fmt.Errorf("%d entities rejected due to conflicted _sync.id", result.rejected)
+		}
+		return result, nil
 	}
 
 	scope := t.Scope
@@ -221,15 +273,37 @@ func runTransition(p *config.Pipeline, baseDir string, t config.Transition, opts
 
 	switch scope {
 	case "entity":
-		moved, failed, err := runEntityTransition(fromDir, toDir, t, ids, opts)
+		var moved, failed int
+		if effect == "sink" {
+			moved, failed, err = runEntitySinkTransition(fromDir, t, ids, opts)
+		} else {
+			moved, failed, err = runEntityTransition(fromDir, toDir, t, ids, opts)
+		}
 		result.moved = moved
-		result.failed = failed
-		return result, err
+		result.failed = failed + result.rejected
+		if err != nil {
+			return result, err
+		}
+		if result.rejected > 0 {
+			return result, fmt.Errorf("%d entities rejected due to conflicted _sync.id", result.rejected)
+		}
+		return result, nil
 	case "batch":
-		moved, failed, err := runBatchTransition(fromDir, toDir, t, ids, opts)
+		var moved, failed int
+		if effect == "sink" {
+			moved, failed, err = runBatchSinkTransition(fromDir, t, ids, opts)
+		} else {
+			moved, failed, err = runBatchTransition(fromDir, toDir, t, ids, opts)
+		}
 		result.moved = moved
-		result.failed = failed
-		return result, err
+		result.failed = failed + result.rejected
+		if err != nil {
+			return result, err
+		}
+		if result.rejected > 0 {
+			return result, fmt.Errorf("%d entities rejected due to conflicted _sync.id", result.rejected)
+		}
+		return result, nil
 	default:
 		return result, fmt.Errorf("unknown scope %q", scope)
 	}
@@ -319,6 +393,55 @@ func runEntityTransition(fromDir, toDir string, t config.Transition, ids []strin
 	return len(importedIDs), 0, nil
 }
 
+func runEntitySinkTransition(fromDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
+	type result struct {
+		id  string
+		err error
+	}
+
+	results := make(chan result, len(ids))
+	var wg sync.WaitGroup
+
+	for _, id := range ids {
+		wg.Add(1)
+		go func(entityID string) {
+			defer wg.Done()
+
+			entityData, err := sap.ReadEntity(fromDir, entityID)
+			if err != nil {
+				results <- result{id: entityID, err: fmt.Errorf("read entity: %w", err)}
+				return
+			}
+
+			if _, err := runAction(t.Run, t.Args, entityData, opts); err != nil {
+				results <- result{id: entityID, err: fmt.Errorf("run action: %w", err)}
+				return
+			}
+
+			results <- result{id: entityID}
+		}(id)
+	}
+
+	wg.Wait()
+	close(results)
+
+	var errs []string
+	for r := range results {
+		if r.err != nil {
+			log.Printf("  entity %s: %v", r.id, r.err)
+			errs = append(errs, r.id)
+			continue
+		}
+		moved++
+	}
+
+	if len(errs) > 0 {
+		return moved, len(errs), fmt.Errorf("%d entities failed", len(errs))
+	}
+
+	return moved, 0, nil
+}
+
 func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
 	// Read all entities from YAML files.
 	var entities []map[string]interface{}
@@ -404,6 +527,33 @@ func runBatchTransition(fromDir, toDir string, t config.Transition, ids []string
 		failed = 0
 	}
 	return len(importedIDs), failed, nil
+}
+
+func runBatchSinkTransition(fromDir string, t config.Transition, ids []string, opts AdvanceOpts) (moved int, failed int, err error) {
+	// Read all entities from YAML files.
+	var entities []map[string]interface{}
+	for _, id := range ids {
+		data, err := os.ReadFile(filepath.Join(fromDir, "entities", id+".yaml"))
+		if err != nil {
+			return 0, 0, fmt.Errorf("read entity %s: %w", id, err)
+		}
+		var m map[string]interface{}
+		if err := yaml.Unmarshal(data, &m); err != nil {
+			return 0, 0, fmt.Errorf("parse entity %s: %w", id, err)
+		}
+		entities = append(entities, m)
+	}
+
+	input, err := json.Marshal(entities)
+	if err != nil {
+		return 0, 0, fmt.Errorf("marshal batch input: %w", err)
+	}
+
+	if _, err := runAction(t.Run, t.Args, input, opts); err != nil {
+		return 0, len(ids), fmt.Errorf("batch action: %w", err)
+	}
+
+	return len(ids), 0, nil
 }
 
 func runAction(executable string, args map[string]string, stdin []byte, opts AdvanceOpts) ([]byte, error) {
@@ -542,6 +692,88 @@ func normalizeFloats(m map[string]interface{}) {
 			}
 		}
 	}
+}
+
+func conflictedSyncIDsInPipeline(p *config.Pipeline, baseDir string) map[string]bool {
+	counts := map[string]int{}
+	for _, stage := range p.Stages {
+		dir := resolvePath(baseDir, stage.Workspace)
+		entDir := filepath.Join(dir, "entities")
+		entries, err := os.ReadDir(entDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(entDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var m map[string]interface{}
+			if err := yaml.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			syncID, ok := valueAtPath(m, "_sync.id")
+			if !ok {
+				continue
+			}
+			counts[fmt.Sprintf("%v", syncID)]++
+		}
+	}
+
+	conflicted := map[string]bool{}
+	for syncID, count := range counts {
+		if count > 1 {
+			conflicted[syncID] = true
+		}
+	}
+
+	return conflicted
+}
+
+func filterConflictedTransitionIDs(p *config.Pipeline, baseDir, fromDir string, ids []string, opts AdvanceOpts) ([]string, int) {
+	conflictedSyncIDs := conflictedSyncIDsInPipeline(p, baseDir)
+	if len(conflictedSyncIDs) == 0 {
+		return ids, 0
+	}
+
+	filtered := make([]string, 0, len(ids))
+	rejected := 0
+	for _, id := range ids {
+		entityData, err := os.ReadFile(filepath.Join(fromDir, "entities", id+".yaml"))
+		if err != nil {
+			// Keep the entity eligible; later execution will report read errors.
+			filtered = append(filtered, id)
+			continue
+		}
+		var m map[string]interface{}
+		if err := yaml.Unmarshal(entityData, &m); err != nil {
+			filtered = append(filtered, id)
+			continue
+		}
+		syncID, ok := valueAtPath(m, "_sync.id")
+		if !ok {
+			filtered = append(filtered, id)
+			continue
+		}
+		syncIDStr := fmt.Sprintf("%v", syncID)
+		if conflictedSyncIDs[syncIDStr] {
+			rejected++
+			if opts.Verbose {
+				log.Printf("  entity %s rejected: conflicted _sync.id=%s", id, syncIDStr)
+			}
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+
+	if rejected > 0 {
+		log.Printf("transition preflight: rejected %d entity(s) due to conflicted _sync.id", rejected)
+	}
+
+	return filtered, rejected
 }
 
 // entityExistsInPipeline checks all stages for an entity with the given property value

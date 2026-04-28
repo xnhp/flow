@@ -36,6 +36,7 @@ type Source struct {
 type Transition struct {
 	From      string            `yaml:"from"`
 	To        string            `yaml:"to"`
+	Effect    string            `yaml:"effect,omitempty"` // "move" (default) or "sink"
 	Condition string            `yaml:"condition,omitempty"`
 	Run       string            `yaml:"run,omitempty"`
 	Args      map[string]string `yaml:"args,omitempty"`
@@ -99,21 +100,41 @@ func validate(p *Pipeline) error {
 	}
 
 	for i, t := range p.Transitions {
+		effect := t.Effect
+		if effect == "" {
+			effect = "move"
+		}
+		if effect != "move" && effect != "sink" {
+			return fmt.Errorf("transition %d: effect must be 'move' or 'sink', got %q", i, t.Effect)
+		}
+
 		if t.From == "" {
 			return fmt.Errorf("transition %d: from is required", i)
-		}
-		if t.To == "" {
-			return fmt.Errorf("transition %d: to is required", i)
 		}
 		if !stageNames[t.From] {
 			return fmt.Errorf("transition %d: unknown source stage %q", i, t.From)
 		}
-		if !stageNames[t.To] {
-			return fmt.Errorf("transition %d: unknown destination stage %q", i, t.To)
+
+		switch effect {
+		case "move":
+			if t.To == "" {
+				return fmt.Errorf("transition %d: to is required for move transitions", i)
+			}
+			if !stageNames[t.To] {
+				return fmt.Errorf("transition %d: unknown destination stage %q", i, t.To)
+			}
+			if t.From == t.To {
+				return fmt.Errorf("transition %d: from and to cannot be the same stage %q", i, t.From)
+			}
+		case "sink":
+			if t.To != "" {
+				return fmt.Errorf("transition %d: to must be empty for sink transitions", i)
+			}
+			if t.Run == "" {
+				return fmt.Errorf("transition %d: run is required for sink transitions", i)
+			}
 		}
-		if t.From == t.To {
-			return fmt.Errorf("transition %d: from and to cannot be the same stage %q", i, t.From)
-		}
+
 		if t.Scope != "" && t.Scope != "entity" && t.Scope != "batch" {
 			return fmt.Errorf("transition %d: scope must be 'entity' or 'batch', got %q", i, t.Scope)
 		}

@@ -274,7 +274,7 @@ sap hooks run post-import <entity-id> [entity-id...]
 ```
 
 Typical callers:
-- `flow nudge` automatically calls `sap hooks run post-import` after importing entities into any stage (sources and transitions). If no hook is configured on the workspace, this is a silent no-op.
+- `flow nudge` calls `sap hooks run post-import` after importing entities into a stage
 - A human calls it manually after `sap import`
 - A script calls it as part of a larger operation
 

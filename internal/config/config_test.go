@@ -182,3 +182,84 @@ transitions:
 		t.Fatal("expected error for invalid scope")
 	}
 }
+
+func TestLoadSinkTransition(t *testing.T) {
+	yaml := `
+stages:
+  - workspace: ./a
+transitions:
+  - from: a
+    effect: sink
+    run: post-comment
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flow.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	p, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Transitions[0].Effect != "sink" {
+		t.Errorf("effect = %q, want sink", p.Transitions[0].Effect)
+	}
+}
+
+func TestLoadSinkTransitionWithToFails(t *testing.T) {
+	yaml := `
+stages:
+  - workspace: ./a
+  - workspace: ./b
+transitions:
+  - from: a
+    to: b
+    effect: sink
+    run: post-comment
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flow.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for sink transition with to")
+	}
+}
+
+func TestLoadSinkTransitionRequiresRun(t *testing.T) {
+	yaml := `
+stages:
+  - workspace: ./a
+transitions:
+  - from: a
+    effect: sink
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flow.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for sink transition without run")
+	}
+}
+
+func TestLoadInvalidEffect(t *testing.T) {
+	yaml := `
+stages:
+  - workspace: ./a
+  - workspace: ./b
+transitions:
+  - from: a
+    to: b
+    effect: stream
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flow.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid effect")
+	}
+}

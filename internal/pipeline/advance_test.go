@@ -78,3 +78,75 @@ func TestEntityExistsInPipeline_MatchesExactNestedPath(t *testing.T) {
 		t.Fatalf("expected dedup check to match explicit nested path")
 	}
 }
+
+func TestConflictedSyncIDsInPipeline(t *testing.T) {
+	baseDir := t.TempDir()
+
+	p := &config.Pipeline{
+		Stages: []config.Stage{
+			{Workspace: "./a"},
+			{Workspace: "./b"},
+		},
+	}
+
+	for _, stage := range []string{"a", "b"} {
+		if err := os.MkdirAll(filepath.Join(baseDir, stage, "entities"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(baseDir, "a", "entities", "e-1.yaml"), []byte("_sync:\n  id: thread-1\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "b", "entities", "e-2.yaml"), []byte("_sync:\n  id: thread-1\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "b", "entities", "e-3.yaml"), []byte("_sync:\n  id: thread-2\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+
+	conflicted := conflictedSyncIDsInPipeline(p, baseDir)
+	if !conflicted["thread-1"] {
+		t.Fatalf("expected thread-1 to be conflicted")
+	}
+	if conflicted["thread-2"] {
+		t.Fatalf("did not expect thread-2 to be conflicted")
+	}
+}
+
+func TestFilterConflictedTransitionIDs(t *testing.T) {
+	baseDir := t.TempDir()
+	fromDir := filepath.Join(baseDir, "filtered")
+	otherDir := filepath.Join(baseDir, "other")
+
+	for _, dir := range []string{fromDir, otherDir} {
+		if err := os.MkdirAll(filepath.Join(dir, "entities"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+
+	p := &config.Pipeline{
+		Stages: []config.Stage{
+			{Workspace: "./filtered"},
+			{Workspace: "./other"},
+		},
+	}
+
+	if err := os.WriteFile(filepath.Join(fromDir, "entities", "a.yaml"), []byte("_sync:\n  id: thread-1\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fromDir, "entities", "b.yaml"), []byte("_sync:\n  id: thread-2\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "entities", "c.yaml"), []byte("_sync:\n  id: thread-1\n"), 0o644); err != nil {
+		t.Fatalf("write entity: %v", err)
+	}
+
+	ids, rejected := filterConflictedTransitionIDs(p, baseDir, fromDir, []string{"a", "b"}, AdvanceOpts{})
+	if rejected != 1 {
+		t.Fatalf("rejected = %d, want 1", rejected)
+	}
+	if len(ids) != 1 || ids[0] != "b" {
+		t.Fatalf("filtered ids = %v, want [b]", ids)
+	}
+}

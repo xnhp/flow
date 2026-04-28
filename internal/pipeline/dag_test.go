@@ -130,3 +130,27 @@ func TestTopoOrderEmpty(t *testing.T) {
 		t.Errorf("order length = %d, want 0", len(order))
 	}
 }
+
+func TestTopoOrderWithSinkTransition(t *testing.T) {
+	p := &config.Pipeline{
+		Stages: []config.Stage{
+			{Workspace: "./a"},
+			{Workspace: "./b"},
+		},
+		Transitions: []config.Transition{
+			{From: "a", To: "b"},
+			{From: "b", Effect: "sink", Run: "post"},
+		},
+	}
+
+	order, err := TopoOrder(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("order length = %d, want 2", len(order))
+	}
+	if order[0] != 0 || order[1] != 1 {
+		t.Errorf("order = %v, want [0, 1]", order)
+	}
+}
